@@ -1,9 +1,6 @@
 // table-tennis/services/telegramBot.js
-// Interactive Telegram bot with /scan command support
 import TelegramBot from "node-telegram-bot-api";
-import generatePredictions from "./predictor.js";
 import { bootstrapElo } from "./elo-bootstrap.js";
-import { generateOverUnderPredictions } from "./over-under-predictor.js";
 import UnifiedTableTennisScraper from "../scrapers/unified-scraper.js";
 import pool from "../db/client.js";
 import dotenv from "dotenv";
@@ -20,16 +17,24 @@ const CHAT_ID =
 if (!BOT_TOKEN) throw new Error("Telegram bot token not set in environment");
 
 let bot;
-let isScanning = false; // prevent concurrent scans
+let isScanning = false;
 
-// ── Message formatters ────────────────────────────────────────────────────────
+// Escape special chars for Telegram MarkdownV2
+function escapeMarkdownV2(text) {
+  if (!text) return "";
+  return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
 
 function formatValueBetMessage(bet) {
-  const time = new Date(bet.scheduledAt).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "UTC",
-  });
+  // Use the pre-formatted times from predictor
+  const timeDisplay = bet.scheduledTimeUtc
+    ? `${bet.scheduledTimeUtc} UTC (${bet.scheduledTimeLocal} local)`
+    : new Date(bet.scheduledAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: "UTC",
+      });
 
   const confidenceEmoji =
     bet.confidence === "HIGH"
@@ -38,104 +43,121 @@ function formatValueBetMessage(bet) {
         ? "🟡"
         : "🔴";
 
-  return (
-    `🎯 *VALUE BET FOUND*\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🏓 *${escapeMarkdown(bet.playerA)}* vs *${escapeMarkdown(bet.playerB)}*\n` +
-    `🏆 ${escapeMarkdown(bet.tournament)} | ⏰ ${time} UTC\n\n` +
-    `📊 *Match Winner Market*\n` +
-    `Bet on: *${escapeMarkdown(bet.favorite)}*\n` +
-    `Odds: \`${bet.marketOdds}\` | Implied: ${bet.impliedProb}%\n` +
-    `Model: ${bet.favoriteProb}% | Edge: *+${bet.edgePercent}%*\n\n` +
-    `📈 *Elo Ratings*\n` +
-    `${escapeMarkdown(bet.playerA)}: ${bet.ratingA} (${bet.gamesA}g)\n` +
-    `${escapeMarkdown(bet.playerB)}: ${bet.ratingB} (${bet.gamesB}g)\n` +
-    `Diff: ${bet.eloDiff} pts\n\n` +
-    `${confidenceEmoji} Confidence: ${bet.confidence}\n` +
-    `💰 Suggested Stake: ${bet.stakeSuggestion?.toLocaleString() || "N/A"}\n` +
-    `📡 Source: ${bet.oddsSource}`
-  );
+  const lines = [
+    "🎯 *VALUE BET FOUND*",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `🏓 *${escapeMarkdownV2(bet.playerA)}* vs *${escapeMarkdownV2(bet.playerB)}*`,
+    `🏆 ${escapeMarkdownV2(bet.tournament)} \\| ⏰ ${escapeMarkdownV2(timeDisplay)}`,
+    "",
+    "📊 *Match Winner Market*",
+    `Bet on: *${escapeMarkdownV2(bet.favorite)}*`,
+    `Odds: \`${escapeMarkdownV2(String(bet.marketOdds))}\` \\| Implied: ${escapeMarkdownV2(String(bet.impliedProb))}%`,
+    `Model: ${escapeMarkdownV2(String(bet.favoriteProb))}% \\| Edge: *\\+${escapeMarkdownV2(String(bet.edgePercent))}%*`,
+    "",
+    "📈 *Elo Ratings*",
+    `${escapeMarkdownV2(bet.playerA)}: ${escapeMarkdownV2(String(bet.ratingA))} \\(${escapeMarkdownV2(String(bet.gamesA))}g\\)`,
+    `${escapeMarkdownV2(bet.playerB)}: ${escapeMarkdownV2(String(bet.ratingB))} \\(${escapeMarkdownV2(String(bet.gamesB))}g\\)`,
+    `Diff: ${escapeMarkdownV2(String(bet.eloDiff))} pts`,
+    "",
+    `${confidenceEmoji} Confidence: ${escapeMarkdownV2(bet.confidence)}`,
+    `💰 Suggested Stake: ${escapeMarkdownV2(bet.stakeSuggestion?.toLocaleString() || "N/A")}`,
+    `📡 Source: ${escapeMarkdownV2(bet.oddsSource)}`,
+    "",
+    `⚠️ *Verification Required*: Check match exists and odds are still available on ${escapeMarkdownV2(bet.oddsSource)} before betting`,
+  ];
+
+  return lines.join("\n");
 }
 
-function formatOverUnderMessage(ou) {
+function formatScanSummary(valueBets, ouPredictions, runtime) {
+  const lines = [
+    `✅ *Scan Complete* \\(${escapeMarkdownV2(String(runtime))}s\\)`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `🎯 Value bets found: *${valueBets.length}*`,
+    `📊 O\\/U predictions: *${ouPredictions.length}*`,
+    "",
+  ];
+
+  if (valueBets.length === 0 && ouPredictions.length === 0) {
+    lines.push("😴 No strong signals right now\\. Try again in 30 minutes\\.");
+  } else {
+    lines.push("📨 Sending detailed alerts above\\.");
+    if (valueBets.length > 0) {
+      lines.push("");
+      lines.push(
+        "⚠️ *Important*: Always verify match exists and odds are still available before betting\\.",
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function escapeMarkdown(text) {
+  if (!text) return "";
+  return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
+
+// Plain text formatter for O/U (no markdown to avoid escaping issues)
+function formatOverUnderMessagePlain(ou) {
+  if (!ou?.scheduledAt) return null;
+
   const time = new Date(ou.scheduledAt).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
     timeZone: "UTC",
   });
 
   const confidenceEmoji =
     ou.confidence === "HIGH" ? "🟢" : ou.confidence === "MEDIUM" ? "🟡" : "🔴";
 
-  const setsRec = ou.sets.recommendation;
-  const ptsRec = ou.points.recommendation;
+  const setsRec = ou.sets?.recommendation;
+  const ptsRec = ou.points?.recommendation;
 
   let setsLine = "";
-  if (setsRec !== "NO BET") {
+  if (setsRec && setsRec !== "NO BET") {
     const isOver = setsRec.includes("OVER");
     const prob = isOver ? ou.sets.probOver : ou.sets.probUnder;
     const edge = isOver ? ou.sets.edgeOver : ou.sets.edgeUnder;
     const odds = isOver ? ou.sets.estOddsOver : ou.sets.estOddsUnder;
-    setsLine =
-      `📐 *Sets Market (O/U 3.5)*\n` +
-      `Bet: *${setsRec}* @ ~${odds}\n` +
-      `Prob: ${prob}% | Edge: *+${edge}%*\n`;
+    setsLine = `Sets Market (O/U 3.5): ${setsRec} @ ~${odds} | Prob: ${prob}% | Edge: +${edge}%`;
   }
 
   let ptsLine = "";
-  if (ptsRec !== "NO BET" && ou.confidence !== "LOW") {
+  if (ptsRec && ptsRec !== "NO BET" && ou.confidence !== "LOW") {
     const isOver = ptsRec.includes("OVER");
     const prob = isOver ? ou.points.probOver : ou.points.probUnder;
     const edge = isOver ? ou.points.edgeOver : ou.points.edgeUnder;
     const odds = isOver ? ou.points.estOddsOver : ou.points.estOddsUnder;
-    ptsLine =
-      `🔢 *Points Market (O/U 74.5)*\n` +
-      `Bet: *${ptsRec}* @ ~${odds}\n` +
-      `Prob: ${prob}% | Edge: *+${edge}%*\n`;
+    ptsLine = `Points Market (O/U 74.5): ${ptsRec} @ ~${odds} | Prob: ${prob}% | Edge: +${edge}%`;
   }
 
   if (!setsLine && !ptsLine) return null;
 
-  return (
-    `📊 *OVER/UNDER PREDICTION*\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🏓 *${escapeMarkdown(ou.playerA)}* vs *${escapeMarkdown(ou.playerB)}*\n` +
-    `🏆 ${escapeMarkdown(ou.tournament || "Table Tennis")} | ⏰ ${time} UTC\n` +
-    `📉 Elo gap: ${ou.eloDiff} pts\n\n` +
-    (setsLine ? setsLine + "\n" : "") +
-    (ptsLine ? ptsLine + "\n" : "") +
-    `💬 ${escapeMarkdown(ou.narrative)}\n` +
-    `${confidenceEmoji} Confidence: ${ou.confidence}`
-  );
-}
+  const lines = [
+    "📊 OVER/UNDER PREDICTION",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `${ou.playerA} vs ${ou.playerB}`,
+    `${ou.tournament || "Table Tennis"} | ${time} UTC`,
+    `Elo gap: ${ou.eloDiff} pts`,
+    "",
+    setsLine,
+    ptsLine,
+    "",
+    `${ou.narrative || ""}`,
+    `${confidenceEmoji} Confidence: ${ou.confidence}`,
+  ];
 
-function formatScanSummary(valueBets, ouPredictions, runtime) {
-  return (
-    `✅ *Scan Complete* (${runtime}s)\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🎯 Value bets found: *${valueBets.length}*\n` +
-    `📊 O/U predictions: *${ouPredictions.length}*\n\n` +
-    (valueBets.length === 0 && ouPredictions.length === 0
-      ? "😴 No strong signals right now\\. Try again in 30 minutes\\."
-      : "📨 Sending detailed alerts above\\.")
-  );
+  return lines.filter((l) => l !== "").join("\n");
 }
-
-function escapeMarkdown(text) {
-  if (!text) return "";
-  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
-}
-
-// ── Core scan function ────────────────────────────────────────────────────────
 
 async function runScan(chatId, triggeredBy = "scheduled") {
   if (isScanning) {
     await bot.sendMessage(
       chatId,
       "⏳ A scan is already in progress\\. Please wait\\.",
-      {
-        parse_mode: "MarkdownV2",
-      },
+      { parse_mode: "MarkdownV2" },
     );
     return;
   }
@@ -144,12 +166,14 @@ async function runScan(chatId, triggeredBy = "scheduled") {
   const startTime = Date.now();
 
   try {
+    const { default: generatePredictions } = await import("./predictor.js");
+    const { generateOverUnderPredictions } =
+      await import("./over-under-predictor.js");
+
     await bot.sendMessage(
       chatId,
       "🔍 *Starting scan\\.\\.\\.*\nRefreshing Elo → Scraping → Predicting",
-      {
-        parse_mode: "MarkdownV2",
-      },
+      { parse_mode: "MarkdownV2" },
     );
 
     // Step 1: Elo refresh
@@ -170,7 +194,7 @@ async function runScan(chatId, triggeredBy = "scheduled") {
       console.warn("Scrape failed:", e.message);
     }
 
-    // Step 3: Get upcoming matches for O/U prediction
+    // Step 3: Get upcoming matches
     const { rows: upcomingMatches } = await pool.query(`
       SELECT 
         m.id, m.external_id,
@@ -223,13 +247,13 @@ async function runScan(chatId, triggeredBy = "scheduled") {
       }
     }
 
-    // Step 7: Send O/U alerts (max 10)
+    // Step 7: Send O/U alerts (plain text, no markdown)
     let ouSent = 0;
     for (const ou of ouPredictions.slice(0, MAX_ALERTS)) {
-      const msg = formatOverUnderMessage(ou);
+      const msg = formatOverUnderMessagePlain(ou);
       if (!msg) continue;
       try {
-        await bot.sendMessage(chatId, msg, { parse_mode: "MarkdownV2" });
+        await bot.sendMessage(chatId, msg); // No parse_mode = plain text
         await new Promise((r) => setTimeout(r, 1000));
         ouSent++;
       } catch (e) {
@@ -248,23 +272,17 @@ async function runScan(chatId, triggeredBy = "scheduled") {
     await bot.sendMessage(
       chatId,
       `❌ Scan failed: ${escapeMarkdown(err.message)}`,
-      {
-        parse_mode: "MarkdownV2",
-      },
+      { parse_mode: "MarkdownV2" },
     );
   } finally {
     isScanning = false;
   }
 }
 
-// ── Bot commands ──────────────────────────────────────────────────────────────
-
 export function startBot() {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
   console.log("[TT-Bot] Telegram bot started with polling...");
 
-  // /start — welcome message
   bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     await bot.sendMessage(
@@ -274,12 +292,12 @@ export function startBot() {
         `/scan \\- Run a fresh prediction scan now\n` +
         `/status \\- Show database stats\n` +
         `/help \\- Show this message\n\n` +
-        `Automatic scans run daily at *03:00 UTC*\\.`,
+        `Automatic scans run daily at *03:00 UTC*\\.\n\n` +
+        `⚠️ *Important*: Always verify odds on the bookmaker site before betting\\.`,
       { parse_mode: "MarkdownV2" },
     );
   });
 
-  // /help
   bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
     await bot.sendMessage(
@@ -291,18 +309,17 @@ export function startBot() {
         `*Markets covered:*\n` +
         `• Match Winner \\(value bet vs Elo model\\)\n` +
         `• Over\\/Under 3\\.5 Sets\n` +
-        `• Over\\/Under 74\\.5 Points`,
+        `• Over\\/Under 74\\.5 Points\n\n` +
+        `⚠️ *Disclaimer*: Predictions are based on models\\. Always verify odds and match existence before betting\\.`,
       { parse_mode: "MarkdownV2" },
     );
   });
 
-  // /scan — manual trigger
   bot.onText(/\/scan/, async (msg) => {
     const chatId = msg.chat.id;
     await runScan(chatId, "manual");
   });
 
-  // /status — DB stats
   bot.onText(/\/status/, async (msg) => {
     const chatId = msg.chat.id;
     try {
@@ -332,15 +349,12 @@ export function startBot() {
     }
   });
 
-  // Handle polling errors gracefully
   bot.on("polling_error", (err) => {
     console.error("[TT-Bot] Polling error:", err.message);
   });
 
   return { bot, runScan };
 }
-
-// ── Standalone send functions (used by index-predict.js scheduled run) ────────
 
 export async function sendValueBetAlertBot(bet) {
   if (!bot) return;
@@ -355,10 +369,10 @@ export async function sendValueBetAlertBot(bet) {
 
 export async function sendOverUnderAlertBot(ou) {
   if (!bot) return;
-  const msg = formatOverUnderMessage(ou);
+  const msg = formatOverUnderMessagePlain(ou);
   if (!msg) return;
   try {
-    await bot.sendMessage(CHAT_ID, msg, { parse_mode: "MarkdownV2" });
+    await bot.sendMessage(CHAT_ID, msg);
   } catch (e) {
     console.error("[TT-Bot] Failed to send O/U alert:", e.message);
   }
@@ -377,7 +391,8 @@ export async function sendDailyReportBot(stats) {
       (stats.topMatch
         ? `🏆 Top bet: ${escapeMarkdown(stats.topMatch)} \\(\\+${escapeMarkdown(stats.topEdge)}\\)\n`
         : "") +
-      `👤 Active players: ${stats.activePlayers?.toLocaleString()}`;
+      `👤 Active players: ${stats.activePlayers?.toLocaleString()}\n\n` +
+      `⚠️ *Disclaimer*: Always verify odds on the bookmaker site before betting\\.`;
 
     await bot.sendMessage(CHAT_ID, msg, { parse_mode: "MarkdownV2" });
   } catch (e) {
