@@ -1,5 +1,5 @@
 // table-tennis/services/telegramAlerts.js
-import TT_CONFIG from "../config.ts";
+import TT_CONFIG from "../config.js";
 
 let bot = null;
 
