@@ -91,20 +91,31 @@ async function main() {
     console.log("🎯 Analyzing value bets...");
     const { predictions, valueBets } = await generatePredictions();
 
-    // ── Step 5: Alerts ────────────────────────────────────────────────────────
+    // ── Step 5: Send up to 10 alerts ─────────────────────────────────────────
+    const MAX_ALERTS = 10;
+
     if (valueBets && valueBets.length > 0) {
-      console.log(`\n💰 Found ${valueBets.length} value bets!`);
-      for (const bet of valueBets.slice(0, 3)) {
+      console.log(
+        `\n💰 Found ${valueBets.length} value bets! Sending top ${Math.min(valueBets.length, MAX_ALERTS)} to Telegram...`,
+      );
+
+      for (const bet of valueBets.slice(0, MAX_ALERTS)) {
         console.log(
           `   • ${bet.playerA} vs ${bet.playerB}: +${bet.edgePercent}% edge`,
         );
         await sendValueBetAlert(bet);
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 1500)); // 1.5s gap to avoid Telegram rate limits
+      }
+
+      if (valueBets.length > MAX_ALERTS) {
+        console.log(
+          `   ℹ️  ${valueBets.length - MAX_ALERTS} additional bets not sent (cap: ${MAX_ALERTS})`,
+        );
       }
     } else {
       console.log("\n📊 No value bets found above threshold today.");
       console.log(
-        `   (Threshold: >${2}% edge required, HIGH/MEDIUM confidence only)`,
+        `   (Threshold: >2% edge required, HIGH/MEDIUM confidence only)`,
       );
     }
 
