@@ -7,7 +7,7 @@ import {
 } from "./services/telegramAlerts.js";
 import pool from "./db/client.js";
 import dotenv from "dotenv";
-
+import UnifiedTableTennisScraper from "./scrapers/unified-scraper.js";
 dotenv.config();
 
 async function getDatabaseStats() {
@@ -61,6 +61,18 @@ async function main() {
       console.warn(
         `⚠️  Elo refresh failed (using cached ratings): ${eloErr.message}\n`,
       );
+    }
+
+    console.log("🔍 Scraping fresh matches...");
+    try {
+      const scraper = new UnifiedTableTennisScraper();
+      await scraper.init();
+      const matches = await scraper.scrapeAllSources();
+      await scraper.saveMatchesToDB(matches);
+      await scraper.close();
+      console.log(`✅ Scraped ${matches.length} matches\n`);
+    } catch (scrapeErr) {
+      console.warn(`⚠️  Scrape failed: ${scrapeErr.message}\n`);
     }
 
     // ── Step 2: Database status ───────────────────────────────────────────────
