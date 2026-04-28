@@ -1,0 +1,11 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "crons": [
+    {
+      "schedule": "0 5 * * *",
+      "command": "cd /app/table-tennis && npm run daily"
+    }
+  ]
+}
