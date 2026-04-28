@@ -3,16 +3,18 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Table Tennis value betting system with Elo ratings",
-  "main": "index.js",
+  "main": "index-predict.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node index-predict.js",
     "daily": "node index.js",
     "daily-quick": "node index-predict.js",
     "status": "node status.js"
   },
   "dependencies": {
-    "dotenv": "^16.0.0",
+    "axios": "^1.15.2",
+    "dotenv": "^16.6.1",
+    "node-telegram-bot-api": "^0.64.0",
     "pg": "^8.11.0",
-    "node-telegram-bot-api": "^0.64.0"
+    "pg-pool": "^3.13.0"
   }
 }
